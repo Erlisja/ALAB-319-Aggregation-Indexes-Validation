@@ -82,6 +82,7 @@ router.get("/learner/:id/avg-class", async (req, res) => {
   else res.send(result).status(200);
 });
 
+//======== REQUIREMENT 1 =========
 
 // Create a GET route at /grades/stats
 // Within this route, create an aggregation pipeline that returns the following information:
@@ -194,6 +195,127 @@ router.get("/stats", async (req, res) => {
   }
 });
 
+//======== REQUIREMENT 2 =========
+// Create a GET route at /grades/stats/:id
+// Within this route, mimic the above aggregation pipeline, but only for learners within a class that has a class_id equal to the specified :id.
+// Create a single-field index on class_id.
+// Create a single-field index on learner_id.
+// Create a compound index on learner_id and class_id, in that order, both ascending.
+// Create the following validation rules on the grades collection:
+// Each document must have a class_id field, which must be an integer between 0 and 300, inclusive.
+// Each document must have a learner_id field, which must be an integer greater than or equal to 0.
+// Change the validation action to "warn."
+
+
+// Create indexes for class_id, learner_id, and compound index
+async function createIndexes() {
+  try {
+    await db.collection("grades").createIndex({ class_id: 1 });
+    await db.collection("grades").createIndex({ learner_id: 1 });
+    await db.collection("grades").createIndex({ learner_id: 1, class_id: 1 });
+    console.log("Indexes created successfully.");
+  } catch (error) {
+    console.error("Error creating indexes: ", error);
+  }
+}
+
+createIndexes();
+// Route to get stats for a specific class
+router.get("/stats/:id", async (req, res) => {
+  const classId = parseInt(req.params.id, 10);
+
+  try {
+    let collection = db.collection("grades");
+
+    // Aggregation pipeline to calculate statistics for the specified class
+    let result = await collection.aggregate([
+      {
+        $match: { class_id: classId }, // Match documents with the specified class_id
+      },
+      {
+        $unwind: { path: "$scores" }, // Unwind the scores array
+      },
+      {
+        $group: {
+          _id: "$student_id",
+          quiz: {
+            $push: {
+              $cond: {
+                if: { $eq: ["$scores.type", "quiz"] },
+                then: "$scores.score",
+                else: "$$REMOVE",
+              },
+            },
+          },
+          exam: {
+            $push: {
+              $cond: {
+                if: { $eq: ["$scores.type", "exam"] },
+                then: "$scores.score",
+                else: "$$REMOVE",
+              },
+            },
+          },
+          homework: {
+            $push: {
+              $cond: {
+                if: { $eq: ["$scores.type", "homework"] },
+                then: "$scores.score",
+                else: "$$REMOVE",
+              },
+            },
+          },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          student_id: "$_id",
+          avg: {
+            $sum: [
+              { $multiply: [{ $avg: "$exam" }, 0.5] },
+              { $multiply: [{ $avg: "$quiz" }, 0.3] },
+              { $multiply: [{ $avg: "$homework" }, 0.2] },
+            ],
+          },
+        },
+      },
+      {
+        $match: { avg: { $gt: 70 } }, // Filter for students with average > 70
+      },
+      {
+        $group: {
+          _id: null,
+          countAbove70: { $sum: 1 }, // Count students with avg > 70
+          total: { $sum: 1 }, // Total number of students in the class
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          countAbove70: 1,
+          total: 1,
+          percentageAbove70: {
+            $cond: {
+              if: { $eq: ["$total", 0] },
+              then: 0,
+              else: { $divide: ["$countAbove70", "$total"] },
+            },
+          }, // Calculate percentage
+        },
+      },
+    ]).toArray();
+
+    if (!result || result.length === 0) {
+      return res.status(404).send("No data found for the specified class.");
+    }
+
+    res.status(200).send(result);
+  } catch (error) {
+    console.error("Error in aggregation:", error);
+    res.status(500).send("An error occurred while processing the request.");
+  }
+});
 
 
 
