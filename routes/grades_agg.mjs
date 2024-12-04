@@ -92,108 +92,97 @@ router.get("/learner/:id/avg-class", async (req, res) => {
 
 router.get("/stats", async (req, res) => {
   try {
-    let collection = await db.collection("grades");
-
-    let result = await collection
+    const stats = await db
+      .collection("grades")
       .aggregate([
-        // Step 1: Unwind the 'scores' array
+        // Step 1: Unwind the scores array to process individual scores
         {
-          $unwind: { path: "$scores" },
+          $unwind: "$scores",
         },
-        // Step 2: Group by student_id and calculate average weighted score
+        // Step 2: Group scores by student_id to calculate weighted averages
         {
           $group: {
-            _id: "$student_id", // Group by student_id
-            quiz: {
+            _id: "$student_id",
+            quizScores: {
               $push: {
-                $cond: {
-                  if: { $eq: ["$scores.type", "quiz"] },
-                  then: "$scores.score",
-                  else: "$$REMOVE",
-                },
+                $cond: [
+                  { $eq: ["$scores.type", "quiz"] },
+                  "$scores.score",
+                  null,
+                ],
               },
             },
-            exam: {
+            examScores: {
               $push: {
-                $cond: {
-                  if: { $eq: ["$scores.type", "exam"] },
-                  then: "$scores.score",
-                  else: "$$REMOVE",
-                },
+                $cond: [
+                  { $eq: ["$scores.type", "exam"] },
+                  "$scores.score",
+                  null,
+                ],
               },
             },
-            homework: {
+            homeworkScores: {
               $push: {
-                $cond: {
-                  if: { $eq: ["$scores.type", "homework"] },
-                  then: "$scores.score",
-                  else: "$$REMOVE",
-                },
+                $cond: [
+                  { $eq: ["$scores.type", "homework"] },
+                  "$scores.score",
+                  null,
+                ],
               },
             },
           },
         },
-        // Step 3: Project the average weighted score and remove the _id field
+        // Step 3: Calculate weighted averages
         {
           $project: {
             _id: 0,
             student_id: "$_id",
-            avg: {
+            weightedAverage: {
               $sum: [
-                { $multiply: [{ $avg: "$exam" }, 0.5] }, // 50% exam
-                { $multiply: [{ $avg: "$quiz" }, 0.3] }, // 30% quiz
-                { $multiply: [{ $avg: "$homework" }, 0.2] }, // 20% homework
+                { $multiply: [{ $avg: "$quizScores" }, 0.3] },
+                { $multiply: [{ $avg: "$examScores" }, 0.5] },
+                { $multiply: [{ $avg: "$homeworkScores" }, 0.2] },
               ],
             },
           },
         },
-        // Step 4: Filter learners with an average score above 70
-        {
-          $match: { avg: { $gt: 70 } },
-        },
-        // Step 5: Calculate the count of learners with avg > 70
+        // Step 4: Calculate the total learners and those with averages above 70%
         {
           $group: {
             _id: null,
-            countAbove70: { $sum: 1 }, // Count of learners above 70%
+            totalLearners: { $sum: 1 },
+            above70Count: {
+              $sum: { $cond: [{ $gt: ["$weightedAverage", 70] }, 1, 0] },
+            },
           },
         },
-        // Step 6: Calculate the total number of learners
-        {
-          $lookup: {
-            from: "grades", // Lookup on the same collection to get total count
-            pipeline: [
-              { $group: { _id: null, total: { $sum: 1 } } }, // Count total learners
-            ],
-            as: "total",
-          },
-        },
-        // Step 7: Project the final stats: countAbove70, total, and percentage
+        // Step 5: Calculate the percentage of learners above 70%
         {
           $project: {
-            countAbove70: 1,
-            total: { $arrayElemAt: ["$total.total", 0] }, // Get the total count from the lookup
-            percentageAbove70: {
+            totalLearners: 1,
+            above70Count: 1,
+            above70Percentage: {
               $multiply: [
-                { $divide: ["$countAbove70", { $arrayElemAt: ["$total.total", 0] }] },
+                { $divide: ["$above70Count", "$totalLearners"] },
                 100,
-              ], // Calculate percentage of learners with avg > 70
+              ],
             },
           },
         },
       ])
       .toArray();
 
-    if (result.length === 0) {
-      res.status(404).send("No data found");
-    } else {
-      res.status(200).send(result);
+    if (!stats.length) {
+      return res.status(404).send({ error: "No learners found" });
     }
-  } catch (err) {
-    console.error("Error: ", err);
-    res.status(500).send("Internal server error");
+
+    res.status(200).send(stats[0]);
+  } catch (error) {
+    console.error("Failed to calculate stats:", error);
+    res.status(500).send({ error: "Internal Server Error" });
   }
 });
+
 
 //======== REQUIREMENT 2 =========
 // Create a GET route at /grades/stats/:id
@@ -207,115 +196,120 @@ router.get("/stats", async (req, res) => {
 // Change the validation action to "warn."
 
 
-// Create indexes for class_id, learner_id, and compound index
-async function createIndexes() {
-  try {
-    await db.collection("grades").createIndex({ class_id: 1 });
-    await db.collection("grades").createIndex({ learner_id: 1 });
-    await db.collection("grades").createIndex({ learner_id: 1, class_id: 1 });
-    console.log("Indexes created successfully.");
-  } catch (error) {
-    console.error("Error creating indexes: ", error);
-  }
-}
 
-createIndexes();
-// Route to get stats for a specific class
 router.get("/stats/:id", async (req, res) => {
-  const classId = parseInt(req.params.id, 10);
+  const classId = Number(req.params.id); // Convert class_id to number
+
+  if (isNaN(classId)) {
+    return res.status(400).send({ error: "Invalid class ID format" });
+  }
 
   try {
-    let collection = db.collection("grades");
+    const stats = await db
+      .collection("grades")
+      .aggregate([
+        { $match: { class_id: classId } }, // Filter by class_id
+        {
+          $group: {
+            _id: "$learner_id", // Group by learner
+            quizScores: {
+              $push: {
+                $cond: [
+                  { $eq: ["$scores.type", "quiz"] },
+                  "$scores.score",
+                  null,
+                ],
+              },
+            },
+            examScores: {
+              $push: {
+                $cond: [
+                  { $eq: ["$scores.type", "exam"] },
+                  "$scores.score",
+                  null,
+                ],
+              },
+            },
+            homeworkScores: {
+              $push: {
+                $cond: [
+                  { $eq: ["$scores.type", "homework"] },
+                  "$scores.score",
+                  null,
+                ],
+              },
+            },
+          },
+        },
+        {
+          $project: {
+            learner_id: "$_id",
+            weightedAverage: {
+              $sum: [
+                { $multiply: [{ $avg: "$quizScores" }, 0.3] },
+                { $multiply: [{ $avg: "$examScores" }, 0.5] },
+                { $multiply: [{ $avg: "$homeworkScores" }, 0.2] },
+              ],
+            },
+          },
+        },
+        {
+          $group: {
+            _id: null, // Group all learners into the class
+            totalLearners: { $sum: 1 },
+            above70Count: {
+              $sum: { $cond: [{ $gt: ["$weightedAverage", 70] }, 1, 0] },
+            },
+          },
+        },
+        {
+          $project: {
+            totalLearners: 1,
+            above70Count: 1,
+            above70Percentage: {
+              $multiply: [
+                { $divide: ["$above70Count", "$totalLearners"] },
+                100,
+              ],
+            },
+          },
+        },
+      ])
+      .toArray();
 
-    // Aggregation pipeline to calculate statistics for the specified class
-    let result = await collection.aggregate([
-      {
-        $match: { class_id: classId }, // Match documents with the specified class_id
-      },
-      {
-        $unwind: { path: "$scores" }, // Unwind the scores array
-      },
-      {
-        $group: {
-          _id: "$student_id",
-          quiz: {
-            $push: {
-              $cond: {
-                if: { $eq: ["$scores.type", "quiz"] },
-                then: "$scores.score",
-                else: "$$REMOVE",
-              },
-            },
-          },
-          exam: {
-            $push: {
-              $cond: {
-                if: { $eq: ["$scores.type", "exam"] },
-                then: "$scores.score",
-                else: "$$REMOVE",
-              },
-            },
-          },
-          homework: {
-            $push: {
-              $cond: {
-                if: { $eq: ["$scores.type", "homework"] },
-                then: "$scores.score",
-                else: "$$REMOVE",
-              },
-            },
-          },
-        },
-      },
-      {
-        $project: {
-          _id: 0,
-          student_id: "$_id",
-          avg: {
-            $sum: [
-              { $multiply: [{ $avg: "$exam" }, 0.5] },
-              { $multiply: [{ $avg: "$quiz" }, 0.3] },
-              { $multiply: [{ $avg: "$homework" }, 0.2] },
-            ],
-          },
-        },
-      },
-      {
-        $match: { avg: { $gt: 70 } }, // Filter for students with average > 70
-      },
-      {
-        $group: {
-          _id: null,
-          countAbove70: { $sum: 1 }, // Count students with avg > 70
-          total: { $sum: 1 }, // Total number of students in the class
-        },
-      },
-      {
-        $project: {
-          _id: 0,
-          countAbove70: 1,
-          total: 1,
-          percentageAbove70: {
-            $cond: {
-              if: { $eq: ["$total", 0] },
-              then: 0,
-              else: { $divide: ["$countAbove70", "$total"] },
-            },
-          }, // Calculate percentage
-        },
-      },
-    ]).toArray();
-
-    if (!result || result.length === 0) {
-      return res.status(404).send("No data found for the specified class.");
+    if (!stats.length) {
+      return res.status(404).send({ error: "No data found for this class" });
     }
 
-    res.status(200).send(result);
+    res.status(200).send(stats[0]);
   } catch (error) {
-    console.error("Error in aggregation:", error);
-    res.status(500).send("An error occurred while processing the request.");
+    console.error("Failed to calculate class stats:", error);
+    res.status(500).send({ error: "Internal Server Error" });
   }
 });
+
+
+
+
+router.post(`/create-indexes`, async (req, res) => {
+  try {
+    const collection = await db.collection(`grades`);
+
+    //Create single-field index on class_id
+    await collection.createIndex({ class_id: 1 });
+
+    //Create single-field index on learner_id
+    await collection.createIndex({ learner_id: 1 });
+
+    //Create single-field index on learner_id and class_id
+    await collection.createIndex({ learner_id: 1, class_id: 1 });
+
+    res.status(200).send({ message: `Indexes created successfully` });
+  } catch (error) {
+    console.error(`Error creating indexes`, error);
+    res.status(500).send({ error: `Failed to create indexes` });
+  }
+}); 
 
 
 
